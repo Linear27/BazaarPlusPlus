@@ -42,26 +42,29 @@ fn normalized_relative_image_path(raw_path: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::resolve_overlay_image_path;
-    use std::path::PathBuf;
 
     #[test]
     fn resolve_overlay_image_path_supports_relative_and_absolute_inputs() {
-        let game_path = Some(PathBuf::from("/tmp/TheBazaar"));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let game_path = Some(temp_dir.path().join("TheBazaar"));
+        let absolute_path = temp_dir
+            .path()
+            .join("BazaarPlusPlus")
+            .join("Screenshots")
+            .join("match-2.png");
         let relative = resolve_overlay_image_path(game_path.clone(), Some("match-1.png")).unwrap();
-        let absolute = resolve_overlay_image_path(
-            game_path,
-            Some("/tmp/BazaarPlusPlus/Screenshots/match-2.png"),
-        )
-        .unwrap();
+        let absolute =
+            resolve_overlay_image_path(game_path.clone(), absolute_path.to_str()).unwrap();
 
         assert_eq!(
             relative,
-            PathBuf::from("/tmp/TheBazaar/BazaarPlusPlus/Screenshots/match-1.png")
+            game_path
+                .unwrap()
+                .join("BazaarPlusPlus")
+                .join("Screenshots")
+                .join("match-1.png")
         );
-        assert_eq!(
-            absolute,
-            PathBuf::from("/tmp/BazaarPlusPlus/Screenshots/match-2.png")
-        );
+        assert_eq!(absolute, absolute_path);
     }
 
     #[test]

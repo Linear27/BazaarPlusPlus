@@ -1,6 +1,6 @@
 {
   "name": "bppinstaller",
-  "version": "3.3.0",
+  "version": "3.3.0-hotfix.1",
   "description": "BazaarPlusPlus Desktop App",
   "type": "module",
   "scripts": {

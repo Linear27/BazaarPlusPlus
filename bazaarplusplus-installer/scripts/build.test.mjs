@@ -1,18 +1,38 @@
 import { test, expect } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 function runShell(script) {
-  return execFileSync('bash', ['-lc', script], {
-    cwd: projectDir,
-    encoding: 'utf8'
-  });
+  const tempDir = mkdtempSync(path.join(projectDir, '.tmp-build-test-'));
+  const scriptPath = path.join(tempDir, 'run.sh');
+  const relativeScriptPath = path.relative(projectDir, scriptPath).replaceAll(path.sep, '/');
+  writeFileSync(scriptPath, script, 'utf8');
+
+  try {
+    return execFileSync('bash', [relativeScriptPath], {
+      cwd: projectDir,
+      encoding: 'utf8'
+    });
+  } finally {
+    rmSync(tempDir, { force: true, recursive: true });
+  }
 }
 
 const projectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const signingSecretsDir = `${projectDir}/signing-secrets`;
+const signingSecretsDirForShell = toShellPath(signingSecretsDir);
+
+function toShellPath(filePath) {
+  const normalized = filePath.replaceAll(path.sep, '/');
+  const driveMatch = normalized.match(/^([A-Za-z]):\/(.*)$/);
+  if (!driveMatch) {
+    return normalized;
+  }
+
+  return `/mnt/${driveMatch[1].toLowerCase()}/${driveMatch[2]}`;
+}
 
 function withSigningSecretFiles(files, fn) {
   const backups = new Map();
@@ -198,7 +218,7 @@ test('macOS Developer ID env loads from signing-secrets files', () => {
     {
       'apple-api-issuer': 'issuer-from-file\n',
       'apple-api-key': 'KEYFROMFILE\n',
-      'apple-api-key-path': `${signingSecretsDir}/AuthKey_KEYFROMFILE.p8\n`,
+      'apple-api-key-path': `${signingSecretsDirForShell}/AuthKey_KEYFROMFILE.p8\n`,
       'apple-signing-identity':
         'Developer ID Application: Example Builder (TEAMID1234)\n',
       'AuthKey_KEYFROMFILE.p8': 'private key'
@@ -227,7 +247,7 @@ test('macOS Developer ID env loads from signing-secrets files', () => {
       expect(output).toContain('issuer=issuer-from-file');
       expect(output).toContain('key=KEYFROMFILE');
       expect(output).toContain(
-        `key_path=${signingSecretsDir}/AuthKey_KEYFROMFILE.p8`
+        `key_path=${signingSecretsDirForShell}/AuthKey_KEYFROMFILE.p8`
       );
       expect(output).toContain(
         'identity=Developer ID Application: Example Builder (TEAMID1234)'
@@ -270,7 +290,7 @@ test('macOS Developer ID env detects identity and infers API key path', () => {
         'Inferring APPLE_API_KEY_PATH from signing-secrets'
       );
       expect(output).toContain(
-        `key_path=${signingSecretsDir}/AuthKey_AUTOKEY.p8`
+        `key_path=${signingSecretsDirForShell}/AuthKey_AUTOKEY.p8`
       );
       expect(output).toContain(
         'identity=Developer ID Application: Example Builder (TEAMID1234)'
@@ -294,6 +314,10 @@ test('Windows upload uses installer and updater R2 paths under the version direc
       set -euo pipefail
       source ./build.sh
       assert_file() { :; }
+      node() {
+        printf 'node|%s\\n' "$*"
+        printf '{}' > "$2"
+      }
       invoke_step() {
         local label="$1"
         shift
