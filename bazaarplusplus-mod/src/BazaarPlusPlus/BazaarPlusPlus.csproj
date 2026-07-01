@@ -4,7 +4,8 @@
     <AssemblyName>BazaarPlusPlus</AssemblyName>
     <Description>BazaarPlusPlus - Game Enhancement Mod</Description>
     <RootNamespace>BazaarPlusPlus</RootNamespace>
-    <Version>$(BppVersion)</Version>
+    <Version>$(BppPluginVersion)</Version>
+    <InformationalVersion>$(BppReleaseVersion)</InformationalVersion>
     <LangVersion>12</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <TargetFramework>netstandard2.1</TargetFramework>
@@ -18,6 +19,21 @@
       >false</BuildProductionPackage
     >
   </PropertyGroup>
+
+  <Target Name="ValidateBppVersions" BeforeTargets="BeforeBuild">
+    <Error
+      Condition="'$(BppReleaseVersion)' == ''"
+      Text="BppReleaseVersion must be set for the user-facing BazaarPlusPlus.version file."
+    />
+    <Error
+      Condition="'$(BppPluginVersion)' == ''"
+      Text="BppPluginVersion must be set for BepInEx plugin metadata."
+    />
+    <Error
+      Condition="!$([System.Text.RegularExpressions.Regex]::IsMatch('$(BppPluginVersion)', '^\d+(\.\d+){1,3}$'))"
+      Text="BppPluginVersion '$(BppPluginVersion)' must be System.Version-compatible for BepInEx plugin metadata."
+    />
+  </Target>
 
   <!-- Embedded resources -->
   <ItemGroup>
@@ -265,7 +281,7 @@
     />
     <WriteLinesToFile
       File="$(GamePath)\BepInEx\plugins\$(TargetName).version"
-      Lines="$(Version).t$([System.DateTime]::Now.ToString('yyyyMMdd.HHmmss')).dev"
+      Lines="$(BppReleaseVersion).t$([System.DateTime]::Now.ToString('yyyyMMdd.HHmmss')).dev"
       Overwrite="true"
     />
     <Message
@@ -283,7 +299,7 @@
     <Message Text="[BazaarPlusPlus] Building for Release" Importance="high" />
     <WriteLinesToFile
       File="$(TargetDir)$(TargetName).version"
-      Lines="$(Version).prod"
+      Lines="$(BppReleaseVersion).prod"
       Overwrite="true"
     />
     <ItemGroup>

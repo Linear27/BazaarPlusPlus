@@ -10,6 +10,11 @@ import {
 
 export const sharedBundledZipPath = 'BepInExSource/BepInEx.zip';
 
+export function parseBepInExPluginVersion(version) {
+  const text = String(version ?? '').trim();
+  return /^\d+(?:\.\d+){1,3}$/.test(text) ? text : null;
+}
+
 const platformAliases = new Map([
   ['darwin', 'macos'],
   ['macos', 'macos'],

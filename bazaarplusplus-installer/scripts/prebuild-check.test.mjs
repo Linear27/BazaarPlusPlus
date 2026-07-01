@@ -8,8 +8,17 @@ import {
   assertMacosTrampolineStub,
   macosTrampolineStubPath,
   npmExecFileInvocation,
+  parseBepInExPluginVersion,
   requiredEntriesForPlatform
 } from './prebuild-check.mjs';
+
+test('BepInEx plugin version parser rejects prerelease identifiers', () => {
+  expect(parseBepInExPluginVersion('4.3.0-hotfix.1')).toBeNull();
+});
+
+test('BepInEx plugin version parser accepts System.Version-compatible values', () => {
+  expect(parseBepInExPluginVersion('4.3.0.2')).toBe('4.3.0.2');
+});
 
 test('macOS bundles BazaarPlusPlus SQLite dependencies', () => {
   expect(requiredEntriesForPlatform('macos')).toEqual([
