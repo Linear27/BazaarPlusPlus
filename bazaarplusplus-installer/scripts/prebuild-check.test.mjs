@@ -5,6 +5,7 @@ import { test, expect } from 'vitest';
 
 import {
   assertMacosLauncherScriptIsSafe,
+  assertBundledReleaseVersion,
   assertMacosTrampolineStub,
   macosTrampolineStubPath,
   npmExecFileInvocation,
@@ -18,6 +19,18 @@ test('BepInEx plugin version parser rejects prerelease identifiers', () => {
 
 test('BepInEx plugin version parser accepts System.Version-compatible values', () => {
   expect(parseBepInExPluginVersion('4.3.0.2')).toBe('4.3.0.2');
+});
+
+test('bundled release version must match installer production version', () => {
+  expect(() =>
+    assertBundledReleaseVersion('4.3.0-hotfix.2.prod', '4.3.0-hotfix.2')
+  ).not.toThrow();
+});
+
+test('bundled release version rejects stale payload versions', () => {
+  expect(() =>
+    assertBundledReleaseVersion('4.3.0-hotfix.1.prod', '4.3.0-hotfix.2')
+  ).toThrow('expected 4.3.0-hotfix.2.prod');
 });
 
 test('macOS bundles BazaarPlusPlus SQLite dependencies', () => {
@@ -116,5 +129,7 @@ test('trampoline stub check rejects a non-Mach-O stub', () => {
   const stubPath = macosTrampolineStubPath(root);
   mkdirSync(path.dirname(stubPath), { recursive: true });
   writeFileSync(stubPath, 'not a mach-o binary');
-  expect(() => assertMacosTrampolineStub(root)).toThrow('not arm64 Mach-O');
+  expect(() => assertMacosTrampolineStub(root, () => 'ASCII text')).toThrow(
+    'not arm64 Mach-O'
+  );
 });

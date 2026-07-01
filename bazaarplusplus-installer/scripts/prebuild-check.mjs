@@ -15,6 +15,16 @@ export function parseBepInExPluginVersion(version) {
   return /^\d+(?:\.\d+){1,3}$/.test(text) ? text : null;
 }
 
+export function assertBundledReleaseVersion(version, packageVersion) {
+  const actual = String(version ?? '').trim();
+  const expected = `${packageVersion}.prod`;
+  if (actual !== expected) {
+    throw new Error(
+      `Bundled BazaarPlusPlus.version is ${actual || '<empty>'}; expected ${expected}. Rebuild the mod production package.`
+    );
+  }
+}
+
 const platformAliases = new Map([
   ['darwin', 'macos'],
   ['macos', 'macos'],
@@ -229,7 +239,7 @@ function ensureMacosLauncherMatchesSource(rootDir, zipPath, buffer) {
   }
 }
 
-function ensureZipLooksValid(rootDir, zipPath, platform) {
+function ensureZipLooksValid(rootDir, zipPath, platform, packageVersion) {
   if (!fs.existsSync(zipPath)) {
     throw new Error(`Missing ${platform} zip: ${zipPath}`);
   }
@@ -253,9 +263,11 @@ function ensureZipLooksValid(rootDir, zipPath, platform) {
   }
 
   const version = readZipEntry(buffer, 'BazaarPlusPlus.version');
-  if (version) {
-    console.log(`[${platform}] BazaarPlusPlus.version: ${version.trim()}`);
+  if (!version) {
+    throw new Error(`${platform} zip is missing BazaarPlusPlus.version content`);
   }
+  assertBundledReleaseVersion(version, packageVersion);
+  console.log(`[${platform}] BazaarPlusPlus.version: ${version.trim()}`);
 
   if (platform === 'macos') {
     ensureMacosLauncherMatchesSource(rootDir, zipPath, buffer);
@@ -273,7 +285,7 @@ export function macosTrampolineStubPath(rootDir) {
   );
 }
 
-export function assertMacosTrampolineStub(rootDir) {
+export function assertMacosTrampolineStub(rootDir, describeFile = null) {
   const stubPath = macosTrampolineStubPath(rootDir);
   if (!fs.existsSync(stubPath)) {
     throw new Error(
@@ -282,7 +294,9 @@ export function assertMacosTrampolineStub(rootDir) {
     );
   }
 
-  const description = execFileSync('file', [stubPath], { encoding: 'utf8' });
+  const description =
+    describeFile?.(stubPath) ??
+    execFileSync('file', [stubPath], { encoding: 'utf8' });
   if (!/Mach-O 64-bit executable arm64/.test(description)) {
     throw new Error(
       `macOS trampoline stub is not arm64 Mach-O (${stubPath}): ${description.trim()}`
@@ -340,7 +354,8 @@ export function runPrebuildCheck(rootDir, platformEnv) {
     ensureZipLooksValid(
       rootDir,
       sourceZipPathForPlatform(rootDir, platform),
-      platform
+      platform,
+      snapshot.packageVersion
     );
   }
 
