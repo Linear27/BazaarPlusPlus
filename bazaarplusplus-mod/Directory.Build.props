@@ -1,7 +1,7 @@
 <Project>
   <PropertyGroup>
-    <BppPluginVersion>4.3.0.3</BppPluginVersion>
-    <BppReleaseVersion>4.3.0-hotfix.3</BppReleaseVersion>
+    <BppPluginVersion>4.3.0.6</BppPluginVersion>
+    <BppReleaseVersion>4.3.0-hotfix.6</BppReleaseVersion>
     <BppVersion>$(BppPluginVersion)</BppVersion>
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
   </PropertyGroup>
