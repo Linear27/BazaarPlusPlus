@@ -69,7 +69,6 @@ internal sealed class CollectionPanel : MonoBehaviour
     private IBppConfig _config = null!;
     private CollectionPanelView? _view;
     private CollectionGridOverlay? _overlay;
-    private CollectionCardPool? _pool;
     private CollectionCardFactory? _factory;
     private CollectionGridVirtualizer? _virtualizer;
     private CollectionCardArtCache? _artCache;
@@ -470,8 +469,7 @@ internal sealed class CollectionPanel : MonoBehaviour
         _virtualizer = null;
         // Destroy card GameObjects first so their patched OnDestroy can null _cardMaterial
         // and Release art-cache refcounts BEFORE we tear the caches down.
-        _pool?.DestroyAll();
-        _pool = null;
+        _factory?.DestroyAll();
         _factory = null;
         _overlay?.Dispose();
         _overlay = null;
@@ -506,8 +504,10 @@ internal sealed class CollectionPanel : MonoBehaviour
         _materialCache = new CollectionCardMaterialCache();
         CollectionCardCacheHost.Install(_artCache, _materialCache);
 
-        _pool = new CollectionCardPool(CollectionGridOverlay.DefaultLayer);
-        _factory = new CollectionCardFactory(_pool, _overlay.BoardRoot!);
+        _factory = new CollectionCardFactory(
+            _overlay.BoardRoot!,
+            CollectionGridOverlay.DefaultLayer
+        );
         _virtualizer = new CollectionGridVirtualizer(_overlay, _factory);
     }
 

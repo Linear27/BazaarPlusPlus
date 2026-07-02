@@ -17,17 +17,14 @@ namespace BazaarPlusPlus.Game.CollectionPanel.Grid;
 
 // Recycler virtualizer: instead of laying out every card in the visible set up front, we
 // only realize cells inside the scroll window (+ overscan) and keep ~realizedRows*cols
-// CardPreviewBase instances alive at a time. Scrolling just rewrites anchoredPosition on
-// the existing cells (O(visible)); only when a cell index moves out of the window do we
-// hand its CardPreviewBase back to the pool and bind a fresh one for the cell entering it.
+// CardPreviewBase instances alive at a time. Scrolling rewrites anchoredPosition on the
+// existing cells (O(visible)); only when a cell index moves out of the window do we destroy
+// its native card and request a fresh one for the cell entering it.
 //
-// Cancellation race (design section 5.3): pool reuse means the same CardPreviewBase can be
-// rebound while its previous SetUp's LoadFrame/LoadArt is still in-flight. The factory
-// returns the SetUp Task; we hold it in the RealizedCell along with a generation counter.
-// ShowWhenReady awaits the task and checks the generation before flipping the cell active:
-// stale tasks no-op. When a cell is recycled mid-SetUp we mark it pending-return and only
-// hand it back to the pool after the task settles, so the next Take never collides with
-// the in-flight load on the same instance.
+// Cancellation race: AssetLoader creates native card UI asynchronously. The factory returns
+// a binding immediately; ShowWhenReady awaits it and checks the generation before binding
+// hover/source adornments or flipping the cell active. If a cell is recycled mid-create,
+// the late card is destroyed instead of reused.
 //
 // Filter/tab changes cancel everything in flight by bumping the global generation guard
 // and re-seeding the visible set; in-progress SetUp tasks complete (their continuations
@@ -310,10 +307,9 @@ internal sealed class CollectionGridVirtualizer
         if (_hoverDispatched)
             return;
 
-        // Cell may be realized but its SetUp Task could still be in flight or have faulted.
-        // OnHover reads _tooltipData which is only populated by CreateTooltipData inside
-        // SetUp's sync prefix; a fault before that point leaves it null. Wait for a clean
-        // completion before dispatching, and retry on subsequent frames if not yet ready.
+        // Cell may be realized before AssetLoader has finished creating its native card.
+        // Wait for a clean completion before dispatching, and retry on subsequent frames if
+        // not yet ready.
         if (_realized.TryGetValue(idx, out var cell) && cell.SetUpTask.IsCompletedSuccessfully)
         {
             cell.HoverRelay?.OnPointerEnter(null!);
@@ -346,37 +342,14 @@ internal sealed class CollectionGridVirtualizer
         _firstWindowDiagnostics?.RecordBind(index, bindStartedAt, binding);
         if (binding == null)
             return;
-        var card = binding.Value.Card;
-        var rect = card.transform as RectTransform;
-        if (rect == null)
-        {
-            _factory.Return(card, binding.Value.Kind);
-            return;
-        }
-
-        var hover = card.gameObject.GetComponent<CollectionCardHoverRelay>();
-        if (hover == null)
-            hover = card.gameObject.AddComponent<CollectionCardHoverRelay>();
-        hover.Bind(card);
-        _sourceMatchesByCardId.TryGetValue(vm.Id, out var sourceMatches);
-        CollectionSourceAttributionBadge.Bind(card.gameObject, sourceMatches);
-
-        if (!CollectionGridConstants.UsePolledHover)
-            EnsureHitTarget(card.gameObject);
 
         var cell = new RealizedCell(
             index,
             vm,
-            binding.Value.Card,
-            binding.Value.Kind,
-            binding.Value.SetUpTask,
-            ++_perCellGeneration,
-            hover,
-            rect
+            binding,
+            ++_perCellGeneration
         );
         _realized[index] = cell;
-        Reposition(index, cell);
-        ApplyCellScale(index, cell);
         _ = ShowWhenReady(cell, _generation);
     }
 
@@ -488,6 +461,9 @@ internal sealed class CollectionGridVirtualizer
             return;
         try
         {
+            if (!BindReadyCell(cell))
+                return;
+
             cell.Card.gameObject.SetActive(true);
             NativeCardPreviewRuntime.Show(
                 cell.Card,
@@ -507,6 +483,30 @@ internal sealed class CollectionGridVirtualizer
                 $"Show invocation for {cell.Vm.Id} failed: {ex.Message}"
             );
         }
+    }
+
+    private bool BindReadyCell(RealizedCell cell)
+    {
+        var card = cell.Card;
+        var rect = cell.CachedRect;
+        if (card == null || rect == null)
+            return false;
+
+        var hover = card.gameObject.GetComponent<CollectionCardHoverRelay>();
+        if (hover == null)
+            hover = card.gameObject.AddComponent<CollectionCardHoverRelay>();
+        hover.Bind(card);
+        cell.HoverRelay = hover;
+
+        _sourceMatchesByCardId.TryGetValue(cell.Vm.Id, out var sourceMatches);
+        CollectionSourceAttributionBadge.Bind(card.gameObject, sourceMatches);
+
+        if (!CollectionGridConstants.UsePolledHover)
+            EnsureHitTarget(card.gameObject);
+
+        Reposition(cell.Index, cell);
+        ApplyCellScale(cell.Index, cell);
+        return true;
     }
 
     // Advance the per-cell fade-in animation. Called from CollectionPanel.Update each frame
@@ -548,7 +548,7 @@ internal sealed class CollectionGridVirtualizer
     private void CompleteRecycle(RealizedCell cell)
     {
         cell.HoverRelay?.Clear();
-        _factory.Return(cell.Card, cell.Kind);
+        _factory.Return(cell.Binding);
     }
 
     private void RecycleAll()
@@ -583,32 +583,24 @@ internal sealed class CollectionGridVirtualizer
         public RealizedCell(
             int index,
             CollectionCardVm vm,
-            Component card,
-            NativeCardPreviewKind kind,
-            Task setUpTask,
-            int generation,
-            CollectionCardHoverRelay hoverRelay,
-            RectTransform cachedRect
+            CollectionCardBinding binding,
+            int generation
         )
         {
             Index = index;
             Vm = vm;
-            Card = card;
-            Kind = kind;
-            SetUpTask = setUpTask;
+            Binding = binding;
             Generation = generation;
-            HoverRelay = hoverRelay;
-            CachedRect = cachedRect;
         }
 
         public int Index { get; }
         public CollectionCardVm Vm { get; }
-        public Component Card { get; }
-        public NativeCardPreviewKind Kind { get; }
-        public Task SetUpTask { get; }
+        public CollectionCardBinding Binding { get; }
+        public Component? Card => Binding.Card;
+        public Task SetUpTask => Binding.SetUpTask;
         public int Generation { get; }
-        public CollectionCardHoverRelay HoverRelay { get; }
-        public RectTransform CachedRect { get; }
+        public CollectionCardHoverRelay? HoverRelay { get; set; }
+        public RectTransform? CachedRect => Binding.Rect;
         public bool PendingReturn { get; set; }
 
         // Fade state. ShowWhenReady sets FadeActive=true with FadeAlpha=0 right after the
@@ -666,10 +658,10 @@ internal sealed class CollectionGridVirtualizer
 
             _attempts++;
             _bindMs += ElapsedMs(startedAt, Stopwatch.GetTimestamp());
-            if (binding.HasValue)
+            if (binding != null)
             {
                 _bound++;
-                _setUpTasks.Add(binding.Value.SetUpTask);
+                _setUpTasks.Add(binding.SetUpTask);
             }
             else
             {

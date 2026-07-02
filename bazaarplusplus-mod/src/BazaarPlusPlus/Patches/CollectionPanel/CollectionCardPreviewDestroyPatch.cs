@@ -7,11 +7,10 @@ using TheBazaar.UI;
 namespace BazaarPlusPlus.Patches.CollectionPanel;
 
 // CardPreviewBase.OnDestroy ends with `if (_cardMaterial) Object.Destroy(_cardMaterial)`.
-// For tracked collection-panel cards that material is owned by CollectionCardMaterialCache
-// and is shared across instances; if the game destroyed it the next card using the same
-// artKey would render with a null material. We null the field in a prefix so the original
-// destroy branch becomes a no-op; the cache itself destroys all shared materials when the
-// panel runtime is torn down.
+// When the collection LoadArt patch has assigned a shared material from
+// CollectionCardMaterialCache, the cache owns that material and releases it here before the
+// original destroy branch can touch it. Cards created entirely by AssetLoader without a
+// tracked cache material fall through to the game's normal material lifecycle.
 //
 // Also Release the L2 art-cache refcount so the LRU eviction can reclaim entries that no
 // longer back any live card.
@@ -27,13 +26,15 @@ internal static class CollectionCardPreviewDestroyPatch
 
         var artCache = CollectionCardCacheHost.ArtCache;
         var materialCache = CollectionCardCacheHost.MaterialCache;
-        if (artCache != null && !string.IsNullOrEmpty(marker.CurrentArtKey))
+        var hasTrackedArtKey = !string.IsNullOrEmpty(marker.CurrentArtKey);
+        if (artCache != null && hasTrackedArtKey)
         {
             artCache.Release(marker.CurrentArtKey!);
             materialCache?.Release(marker.CurrentArtKey!);
             marker.CurrentArtKey = null;
         }
 
-        __instance._cardMaterial = null!;
+        if (hasTrackedArtKey && materialCache?.Contains(__instance._cardMaterial) == true)
+            __instance._cardMaterial = null!;
     }
 }
