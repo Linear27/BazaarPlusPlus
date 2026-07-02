@@ -71,8 +71,6 @@ internal sealed class CollectionPanel : MonoBehaviour
     private CollectionGridOverlay? _overlay;
     private CollectionCardFactory? _factory;
     private CollectionGridVirtualizer? _virtualizer;
-    private CollectionCardArtCache? _artCache;
-    private CollectionCardMaterialCache? _materialCache;
 
     private IBppServices _services = null!;
     private IReadOnlyList<CollectionCardVm> _catalogCards = Array.Empty<CollectionCardVm>();
@@ -403,7 +401,6 @@ internal sealed class CollectionPanel : MonoBehaviour
             _scrollY = _view.ReadScrollYPixels();
         _virtualizer?.SetScrollY(_scrollY);
         _virtualizer?.Tick();
-        _virtualizer?.TickFades(dt);
 
         if (CollectionGridConstants.UsePolledHover && _virtualizer != null)
         {
@@ -467,19 +464,12 @@ internal sealed class CollectionPanel : MonoBehaviour
         CancelPanelLoad();
         _virtualizer?.Dispose();
         _virtualizer = null;
-        // Destroy card GameObjects first so their patched OnDestroy can null _cardMaterial
-        // and Release art-cache refcounts BEFORE we tear the caches down.
         _factory?.DestroyAll();
         _factory = null;
         _overlay?.Dispose();
         _overlay = null;
         _view?.Dispose();
         _view = null;
-        CollectionCardCacheHost.Uninstall(_artCache, _materialCache);
-        _materialCache?.DisposeAll();
-        _materialCache = null;
-        _artCache?.DisposeAll();
-        _artCache = null;
     }
 
     private void EnsureView()
@@ -499,10 +489,6 @@ internal sealed class CollectionPanel : MonoBehaviour
 
         _overlay = new CollectionGridOverlay();
         _overlay.EnsureInitialized();
-
-        _artCache = new CollectionCardArtCache();
-        _materialCache = new CollectionCardMaterialCache();
-        CollectionCardCacheHost.Install(_artCache, _materialCache);
 
         _factory = new CollectionCardFactory(
             _overlay.BoardRoot!,

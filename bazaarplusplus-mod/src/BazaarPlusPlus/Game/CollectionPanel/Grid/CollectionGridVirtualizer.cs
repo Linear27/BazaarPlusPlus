@@ -191,6 +191,9 @@ internal sealed class CollectionGridVirtualizer
         }
         _firstWindowDiagnostics?.TryLogBindingPhase(_generation);
 
+        foreach (var pair in _realized)
+            TryActivateReadyCell(pair.Value);
+
         // 3) Reposition realized cells whenever the scroll offset moved (or the base unit
         // changed on a viewport resize, _scaleDirty). Skipping when nothing changed avoids
         // forcing a Canvas rebuild on idle frames. Slots track the same window so the grid
@@ -201,9 +204,8 @@ internal sealed class CollectionGridVirtualizer
             _lastScrollY = _scrollY;
             foreach (var pair in _realized)
             {
-                Reposition(pair.Key, pair.Value);
-                if (_scaleDirty)
-                    ApplyCellScale(pair.Key, pair.Value);
+                if (pair.Value.LayoutReady)
+                    FitCellToSlot(pair.Key, pair.Value);
             }
             _scaleDirty = false;
             SyncSlots(firstIdx, lastIdx);
@@ -350,51 +352,67 @@ internal sealed class CollectionGridVirtualizer
             ++_perCellGeneration
         );
         _realized[index] = cell;
-        _ = ShowWhenReady(cell, _generation);
     }
 
-    // Scale the native card to fit its span cell, centered, never stretched. The cell is shrunk
-    // by CellContentInset on every side so the slot background reads as a frame around the card.
-    private void ApplyCellScale(int index, RealizedCell cell)
+    // Fit the native card's visible frame to its span cell. The current game UI card root is
+    // not the visual card frame; measuring FrameContainer keeps collection cards aligned with
+    // the same bounds used by live build previews.
+    private void FitCellToSlot(int index, RealizedCell cell)
     {
-        var rect = cell.CachedRect;
-        if (rect == null)
+        var host = cell.HostRect;
+        var cardRect = cell.CachedRect;
+        if (host == null || cardRect == null)
             return;
+
         var cellRect = _layout.ContentRectFor(index, _unit, _gap, _originX, _originY);
         var inset = CollectionGridConstants.CellContentInset;
-        var sizeDelta = rect.sizeDelta;
-        var natW = Mathf.Max(1f, sizeDelta.x);
-        var natH = Mathf.Max(1f, sizeDelta.y);
+        var frame = FindDescendant(cardRect, "FrameContainer") ?? cardRect;
 
-        // Scale to the cell HEIGHT so every card in a shelf renders the same height. Native item
-        // cards share one prefab height and a shelf shares one cell height, so a height-based
-        // scale aligns small/medium/large tops and bottoms — the old min(w,h) fit left the
-        // narrow small cards width-limited and therefore slightly shorter. Clamp so a card never
-        // grows past its cell width + one gutter (prevents overlapping the neighbour); because
-        // that bound is exactly span*(unit+gap), the clamped scale is identical across spans, so
-        // the uniform height survives even when a card is width-limited.
+        Reposition(index, cell);
+        host.localScale = Vector3.one;
+        Canvas.ForceUpdateCanvases();
+
+        var bounds = MeasureWorldBounds(frame);
+        if (bounds.Width <= 0f || bounds.Height <= 0f)
+            return;
+
+        // Scale to the visible frame HEIGHT so every card in a shelf renders the same height.
+        // Clamp by visible frame width + one gutter, which preserves the old span behavior while
+        // removing the stale assumption that the root RectTransform is the card face.
         var targetH = Mathf.Max(1f, cellRect.Height * (1f - 2f * inset));
-        var scale = targetH / natH;
+        var scale = targetH / bounds.Height;
         var maxWidth = cellRect.Width + _gap;
-        if (natW * scale > maxWidth)
-            scale = maxWidth / natW;
+        if (bounds.Width * scale > maxWidth)
+            scale = maxWidth / bounds.Width;
         if (scale <= 0f || float.IsNaN(scale) || float.IsInfinity(scale))
             scale = 1f;
-        rect.localScale = new Vector3(scale, scale, 1f);
+        host.localScale = new Vector3(scale, scale, 1f);
+        Canvas.ForceUpdateCanvases();
+
+        bounds = MeasureWorldBounds(frame);
+        var targetCenter = BoardLocalToWorld(
+            cellRect.X + cellRect.Width * 0.5f,
+            cellRect.Y - _scrollY + cellRect.Height * 0.5f
+        );
+        host.position += new Vector3(
+            targetCenter.x - bounds.CenterX,
+            targetCenter.y - bounds.CenterY,
+            0f
+        );
     }
 
     private void Reposition(int index, RealizedCell cell)
     {
-        var rect = cell.CachedRect;
-        if (rect == null)
+        var host = cell.HostRect;
+        if (host == null)
             return;
         var cellRect = _layout.ContentRectFor(index, _unit, _gap, _originX, _originY);
         var screenTop = cellRect.Y - _scrollY;
         // Board pivot is top-left, so y goes negative. Place card pivot at cell center.
-        rect.anchorMin = new Vector2(0f, 1f);
-        rect.anchorMax = new Vector2(0f, 1f);
-        rect.pivot = new Vector2(0.5f, 0.5f);
-        rect.anchoredPosition = new Vector2(
+        host.anchorMin = new Vector2(0f, 1f);
+        host.anchorMax = new Vector2(0f, 1f);
+        host.pivot = new Vector2(0.5f, 0.5f);
+        host.anchoredPosition = new Vector2(
             cellRect.X + cellRect.Width * 0.5f,
             -(screenTop + cellRect.Height * 0.5f)
         );
@@ -435,27 +453,23 @@ internal sealed class CollectionGridVirtualizer
         }
     }
 
-    private async Task ShowWhenReady(RealizedCell cell, int generationSnapshot)
+    private void TryActivateReadyCell(RealizedCell cell)
     {
-        try
+        if (cell.ActivationAttempted)
+            return;
+        if (!cell.SetUpTask.IsCompleted)
+            return;
+        cell.ActivationAttempted = true;
+
+        if (!cell.SetUpTask.IsCompletedSuccessfully)
         {
-            await cell.SetUpTask;
-        }
-        catch (Exception ex)
-        {
+            var reason = cell.SetUpTask.Exception?.GetBaseException().Message ?? "not successful";
             BppLog.Debug(
                 "CollectionGridVirtualizer",
-                $"SetUp task for {cell.Vm.Id} faulted: {ex.Message}"
+                $"SetUp task for {cell.Vm.Id} faulted: {reason}"
             );
-        }
-
-        if (cell.PendingReturn)
-        {
-            CompleteRecycle(cell);
             return;
         }
-        if (generationSnapshot != _generation)
-            return;
 
         if (cell.Card == null)
             return;
@@ -470,11 +484,8 @@ internal sealed class CollectionGridVirtualizer
                 show: true,
                 logComponent: "CollectionGridVirtualizer"
             );
-            // Show(true) re-activates _cardImage / _frameContainer; the CanvasGroup at the
-            // root was zeroed on Take, so the card still renders transparent. Hand the cell
-            // off to TickFades to ramp it up.
-            cell.FadeAlpha = 0f;
-            cell.FadeActive = true;
+            FitCellToSlot(cell.Index, cell);
+            cell.LayoutReady = true;
         }
         catch (Exception ex)
         {
@@ -489,7 +500,7 @@ internal sealed class CollectionGridVirtualizer
     {
         var card = cell.Card;
         var rect = cell.CachedRect;
-        if (card == null || rect == null)
+        if (card == null || rect == null || cell.HostRect == null)
             return false;
 
         var hover = card.gameObject.GetComponent<CollectionCardHoverRelay>();
@@ -504,44 +515,12 @@ internal sealed class CollectionGridVirtualizer
         if (!CollectionGridConstants.UsePolledHover)
             EnsureHitTarget(card.gameObject);
 
-        Reposition(cell.Index, cell);
-        ApplyCellScale(cell.Index, cell);
         return true;
-    }
-
-    // Advance the per-cell fade-in animation. Called from CollectionPanel.Update each frame
-    // while the panel is visible. Cells that ShowWhenReady has not yet handed off remain at
-    // CanvasGroup.alpha = 0 (set on Take) and are skipped here.
-    public void TickFades(float deltaSeconds)
-    {
-        if (deltaSeconds <= 0f)
-            return;
-        var t = 1f - Mathf.Exp(-deltaSeconds / CollectionGridConstants.CardFadeInSeconds);
-        foreach (var pair in _realized)
-        {
-            var cell = pair.Value;
-            if (!cell.FadeActive || cell.Card == null)
-                continue;
-            cell.FadeAlpha = Mathf.Lerp(cell.FadeAlpha, 1f, t);
-            if (cell.FadeAlpha >= 0.995f)
-            {
-                cell.FadeAlpha = 1f;
-                cell.FadeActive = false;
-            }
-            var canvasGroup = cell.Card.GetComponent<CanvasGroup>();
-            if (canvasGroup != null)
-                canvasGroup.alpha = cell.FadeAlpha;
-        }
     }
 
     private void RecycleCell(RealizedCell cell)
     {
         cell.HoverRelay?.Clear();
-        if (cell.SetUpTask is { IsCompleted: false })
-        {
-            cell.PendingReturn = true;
-            return;
-        }
         CompleteRecycle(cell);
     }
 
@@ -578,6 +557,55 @@ internal sealed class CollectionGridVirtualizer
         _originY = pixels.OriginY;
     }
 
+    private Vector2 BoardLocalToWorld(float x, float yDown)
+    {
+        var board = _overlay.BoardRoot;
+        if (board == null)
+            return Vector2.zero;
+
+        return board.TransformPoint(new Vector3(x, -yDown, 0f));
+    }
+
+    private static WorldBounds MeasureWorldBounds(RectTransform rect)
+    {
+        var corners = new Vector3[4];
+        rect.GetWorldCorners(corners);
+        return new WorldBounds(
+            corners[0].x,
+            corners[0].y,
+            corners[2].x - corners[0].x,
+            corners[2].y - corners[0].y
+        );
+    }
+
+    private static RectTransform? FindDescendant(Transform root, string childName)
+    {
+        foreach (var rt in root.GetComponentsInChildren<RectTransform>(true))
+        {
+            if (rt != null && rt.name == childName)
+                return rt;
+        }
+        return null;
+    }
+
+    private readonly struct WorldBounds
+    {
+        public WorldBounds(float x, float y, float width, float height)
+        {
+            X = x;
+            Y = y;
+            Width = width;
+            Height = height;
+        }
+
+        public float X { get; }
+        public float Y { get; }
+        public float Width { get; }
+        public float Height { get; }
+        public float CenterX => X + Width * 0.5f;
+        public float CenterY => Y + Height * 0.5f;
+    }
+
     private sealed class RealizedCell
     {
         public RealizedCell(
@@ -601,14 +629,9 @@ internal sealed class CollectionGridVirtualizer
         public int Generation { get; }
         public CollectionCardHoverRelay? HoverRelay { get; set; }
         public RectTransform? CachedRect => Binding.Rect;
-        public bool PendingReturn { get; set; }
-
-        // Fade state. ShowWhenReady sets FadeActive=true with FadeAlpha=0 right after the
-        // card's Show(true); TickFades ramps FadeAlpha → 1 and writes it to the CanvasGroup.
-        // FadeActive stays false during the SetUp loading phase so the card remains hidden
-        // (the CanvasGroup alpha was zeroed on Take).
-        public bool FadeActive { get; set; }
-        public float FadeAlpha { get; set; }
+        public RectTransform? HostRect => Binding.Host;
+        public bool ActivationAttempted { get; set; }
+        public bool LayoutReady { get; set; }
     }
 
     private sealed class FirstWindowBindDiagnostics

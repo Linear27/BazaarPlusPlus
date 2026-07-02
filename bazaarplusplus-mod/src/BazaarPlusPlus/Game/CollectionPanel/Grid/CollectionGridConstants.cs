@@ -64,10 +64,6 @@ internal static class CollectionGridConstants
     // flag is flipped in source.
     public static readonly bool UsePolledHover = true;
 
-    // Animation tuning. All durations are characteristic times for an exponential lerp
-    // (t = 1 - exp(-dt / tau)), so the visible motion finishes within ~3*tau seconds.
-    public const float CardFadeInSeconds = 0.18f;
-
     // Open is a presentation (deliberate); close is a dismissal (snappy). With out at 0.04
     // the close-fade visually settles in ~120ms, fast enough not to feel like the panel
     // is "lingering" after Escape / F9, but still smooth enough to avoid a hard pop.

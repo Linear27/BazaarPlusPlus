@@ -9,6 +9,7 @@ using BazaarGameShared.Domain.Cards.Skill;
 using BazaarGameShared.Domain.Core.Types;
 using BazaarPlusPlus.Game.CollectionPanel.Data;
 using BazaarPlusPlus.GameInterop.CardPreview;
+using BazaarPlusPlus.GameInterop.ItemBoardPreview;
 using BazaarPlusPlus.Infrastructure;
 using TheBazaar.AppFramework;
 using UnityEngine;
@@ -21,7 +22,7 @@ namespace BazaarPlusPlus.Game.CollectionPanel.Grid;
 // InstantiateUICardAsync call completes; the binding owns that race and destroys late cards.
 internal sealed class CollectionCardFactory
 {
-    private readonly Transform _parent;
+    private readonly RectTransform _parent;
     private readonly int _layer;
     private readonly GameObject _stagingRoot;
     private readonly List<GameObject> _created = new();
@@ -29,7 +30,7 @@ internal sealed class CollectionCardFactory
     private bool _disposed;
     private int _instanceCounter;
 
-    public CollectionCardFactory(Transform parent, int layer)
+    public CollectionCardFactory(RectTransform parent, int layer)
     {
         _parent = parent ?? throw new ArgumentNullException(nameof(parent));
         _layer = layer;
@@ -69,10 +70,11 @@ internal sealed class CollectionCardFactory
                 ? NativeCardPreviewKind.ForSkill()
                 : NativeCardPreviewKind.ForItem(vm.Size);
 
-        var instance = BuildSyntheticInstance(vm);
-        var binding = new CollectionCardBinding(kind);
+        var instanceIndex = ++_instanceCounter;
+        var instance = BuildSyntheticInstance(vm, instanceIndex);
+        var binding = new CollectionCardBinding(kind, _parent, _layer, instanceIndex);
         _bindings.Add(binding);
-        _ = CreateCardAsync(binding, assetLoader, instance, kind, _instanceCounter);
+        _ = CreateCardAsync(binding, assetLoader, instance, kind, instanceIndex);
         return binding;
     }
 
@@ -90,7 +92,10 @@ internal sealed class CollectionCardFactory
     {
         _disposed = true;
         foreach (var binding in _bindings)
+        {
             binding.MarkReleased();
+            DestroyBindingObjects(binding);
+        }
         _bindings.Clear();
 
         foreach (var go in _created)
@@ -121,11 +126,8 @@ internal sealed class CollectionCardFactory
                 return;
             }
 
-            go = await assetLoader.InstantiateUICardAsync(
-                instance,
-                _stagingRoot.transform,
-                CancellationToken.None
-            );
+            var cardParent = binding.Socket != null ? binding.Socket : _stagingRoot.transform;
+            go = await assetLoader.InstantiateUICardAsync(instance, cardParent, CancellationToken.None);
             if (go == null)
             {
                 binding.MarkReady();
@@ -158,15 +160,8 @@ internal sealed class CollectionCardFactory
             if (go.GetComponent<CollectionPanelOwnedMarker>() == null)
                 go.AddComponent<CollectionPanelOwnedMarker>();
 
-            var canvasGroup = go.GetComponent<CanvasGroup>();
-            if (canvasGroup == null)
-                canvasGroup = go.AddComponent<CanvasGroup>();
-            canvasGroup.alpha = 0f;
-
-            go.transform.SetParent(_parent, worldPositionStays: false);
             go.SetActive(true);
             NativeCardPreviewRuntime.Resize(card, "CollectionCardFactory");
-            go.SetActive(false);
 
             _created.Add(go);
             binding.Bind(card, rect);
@@ -186,22 +181,25 @@ internal sealed class CollectionCardFactory
 
     private void DestroyBoundCard(CollectionCardBinding binding)
     {
-        var card = binding.Card;
-        if (card == null)
-            return;
-
-        var go = card.gameObject;
-        if (go != null)
-        {
-            _created.Remove(go);
-            Object.Destroy(go);
-        }
+        DestroyBindingObjects(binding);
     }
 
-    private TCardInstance BuildSyntheticInstance(CollectionCardVm vm)
+    private void DestroyBindingObjects(CollectionCardBinding binding)
+    {
+        var go = binding.Card?.gameObject;
+        if (go != null)
+            _created.Remove(go);
+
+        if (binding.Host != null)
+            binding.DestroyHost();
+        else if (go != null)
+            Object.Destroy(go);
+    }
+
+    private TCardInstance BuildSyntheticInstance(CollectionCardVm vm, int instanceIndex)
     {
         var attributes = new Dictionary<ECardAttributeType, int>();
-        var id = $"bpp-collection-{++_instanceCounter}";
+        var id = $"bpp-collection-{instanceIndex}";
 
         if (vm.Type == ECardType.Skill)
         {
@@ -232,14 +230,29 @@ internal sealed class CollectionCardBinding
 {
     private readonly TaskCompletionSource<object?> _ready = new();
 
-    public CollectionCardBinding(NativeCardPreviewKind kind)
+    public CollectionCardBinding(
+        NativeCardPreviewKind kind,
+        RectTransform parent,
+        int layer,
+        int instanceIndex
+    )
     {
         Kind = kind;
         SetUpTask = _ready.Task;
+        Host = CreateHost(parent, layer, instanceIndex);
+        Socket = ItemBoardSocketLayout.BuildSocket(
+            Host,
+            layer,
+            $"CollectionPanelNativeSocket_{Mathf.Max(0, instanceIndex)}"
+        );
+        Socket.anchoredPosition = Vector2.zero;
+        Host.sizeDelta = Socket.sizeDelta;
     }
 
     public Component? Card { get; private set; }
     public RectTransform? Rect { get; private set; }
+    public RectTransform? Host { get; private set; }
+    public RectTransform? Socket { get; private set; }
     public NativeCardPreviewKind Kind { get; }
     public Task SetUpTask { get; }
     public bool IsReleased { get; private set; }
@@ -255,4 +268,31 @@ internal sealed class CollectionCardBinding
     public void MarkFailed(Exception ex) => _ready.TrySetException(ex);
 
     public void MarkReleased() => IsReleased = true;
+
+    public void DestroyHost()
+    {
+        if (Host != null)
+            Object.Destroy(Host.gameObject);
+        Host = null;
+        Socket = null;
+        Card = null;
+        Rect = null;
+    }
+
+    private static RectTransform CreateHost(RectTransform parent, int layer, int instanceIndex)
+    {
+        var go = new GameObject(
+            $"CollectionPanelCardHost_{Mathf.Max(0, instanceIndex)}",
+            typeof(RectTransform)
+        );
+        go.layer = layer;
+        var host = go.GetComponent<RectTransform>();
+        host.SetParent(parent, worldPositionStays: false);
+        host.anchorMin = new Vector2(0f, 1f);
+        host.anchorMax = new Vector2(0f, 1f);
+        host.pivot = new Vector2(0.5f, 0.5f);
+        host.anchoredPosition = Vector2.zero;
+        host.localScale = Vector3.one;
+        return host;
+    }
 }
