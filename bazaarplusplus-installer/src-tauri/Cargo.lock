@@ -350,7 +350,7 @@ dependencies = [
 
 [[package]]
 name = "bppinstaller"
-version = "4.3.0-hotfix.6"
+version = "4.3.0-hotfix.7"
 dependencies = [
  "axum",
  "base64 0.22.1",
