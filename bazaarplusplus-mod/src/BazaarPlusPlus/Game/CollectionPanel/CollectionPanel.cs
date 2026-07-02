@@ -401,6 +401,7 @@ internal sealed class CollectionPanel : MonoBehaviour
             _scrollY = _view.ReadScrollYPixels();
         _virtualizer?.SetScrollY(_scrollY);
         _virtualizer?.Tick();
+        _virtualizer?.TickFades(dt);
 
         if (CollectionGridConstants.UsePolledHover && _virtualizer != null)
         {

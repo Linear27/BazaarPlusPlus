@@ -104,7 +104,7 @@ internal sealed class CollectionGridVirtualizer
         _lastScrollY = float.NaN;
         _firstWindowDiagnostics =
             BppBuild.IsDebug && _visible.Count > 0
-                ? new FirstWindowBindDiagnostics(_generation)
+                ? new FirstWindowBindDiagnostics(_generation, _factory.Stats.Snapshot())
                 : null;
     }
 
@@ -189,7 +189,7 @@ internal sealed class CollectionGridVirtualizer
                 break;
             TryRealize(idx);
         }
-        _firstWindowDiagnostics?.TryLogBindingPhase(_generation);
+        _firstWindowDiagnostics?.TryLogBindingPhase(_generation, _factory.Stats.Snapshot());
 
         foreach (var pair in _realized)
             TryActivateReadyCell(pair.Value);
@@ -205,7 +205,7 @@ internal sealed class CollectionGridVirtualizer
             foreach (var pair in _realized)
             {
                 if (pair.Value.LayoutReady)
-                    FitCellToSlot(pair.Key, pair.Value);
+                    ApplyCellTransform(pair.Key, pair.Value);
             }
             _scaleDirty = false;
             SyncSlots(firstIdx, lastIdx);
@@ -354,67 +354,66 @@ internal sealed class CollectionGridVirtualizer
         _realized[index] = cell;
     }
 
-    // Fit the native card's visible frame to its span cell. The current game UI card root is
-    // not the visual card frame; measuring FrameContainer keeps collection cards aligned with
-    // the same bounds used by live build previews.
-    private void FitCellToSlot(int index, RealizedCell cell)
+    // Measure the native card's visible frame once per bind. Scrolling then applies a cheap
+    // cached host transform instead of forcing a Canvas rebuild for every visible card.
+    private bool EnsureFrameMetrics(RealizedCell cell)
     {
         var host = cell.HostRect;
-        var cardRect = cell.CachedRect;
-        if (host == null || cardRect == null)
+        var frame = cell.FrameRect;
+        if (host == null || frame == null)
+            return false;
+
+        if (cell.Binding.FrameMetrics.HasValue)
+            return true;
+
+        host.localScale = Vector3.one;
+        Canvas.ForceUpdateCanvases();
+
+        var bounds = MeasureLocalBounds(frame, host);
+        if (bounds.Width <= 0f || bounds.Height <= 0f)
+            return false;
+
+        cell.Binding.SetFrameMetrics(
+            new CollectionCardFrameMetrics(
+                bounds.Width,
+                bounds.Height,
+                new Vector2(bounds.CenterX, bounds.CenterY)
+            )
+        );
+        return true;
+    }
+
+    private void ApplyCellTransform(int index, RealizedCell cell)
+    {
+        var host = cell.HostRect;
+        var metrics = cell.Binding.FrameMetrics;
+        if (host == null || !metrics.HasValue)
             return;
 
         var cellRect = _layout.ContentRectFor(index, _unit, _gap, _originX, _originY);
         var inset = CollectionGridConstants.CellContentInset;
-        var frame = FindDescendant(cardRect, "FrameContainer") ?? cardRect;
-
-        Reposition(index, cell);
-        host.localScale = Vector3.one;
-        Canvas.ForceUpdateCanvases();
-
-        var bounds = MeasureWorldBounds(frame);
-        if (bounds.Width <= 0f || bounds.Height <= 0f)
-            return;
+        var m = metrics.Value;
 
         // Scale to the visible frame HEIGHT so every card in a shelf renders the same height.
         // Clamp by visible frame width + one gutter, which preserves the old span behavior while
         // removing the stale assumption that the root RectTransform is the card face.
         var targetH = Mathf.Max(1f, cellRect.Height * (1f - 2f * inset));
-        var scale = targetH / bounds.Height;
+        var scale = targetH / m.Height;
         var maxWidth = cellRect.Width + _gap;
-        if (bounds.Width * scale > maxWidth)
-            scale = maxWidth / bounds.Width;
+        if (m.Width * scale > maxWidth)
+            scale = maxWidth / m.Width;
         if (scale <= 0f || float.IsNaN(scale) || float.IsInfinity(scale))
             scale = 1f;
-        host.localScale = new Vector3(scale, scale, 1f);
-        Canvas.ForceUpdateCanvases();
 
-        bounds = MeasureWorldBounds(frame);
-        var targetCenter = BoardLocalToWorld(
-            cellRect.X + cellRect.Width * 0.5f,
-            cellRect.Y - _scrollY + cellRect.Height * 0.5f
-        );
-        host.position += new Vector3(
-            targetCenter.x - bounds.CenterX,
-            targetCenter.y - bounds.CenterY,
-            0f
-        );
-    }
-
-    private void Reposition(int index, RealizedCell cell)
-    {
-        var host = cell.HostRect;
-        if (host == null)
-            return;
-        var cellRect = _layout.ContentRectFor(index, _unit, _gap, _originX, _originY);
-        var screenTop = cellRect.Y - _scrollY;
-        // Board pivot is top-left, so y goes negative. Place card pivot at cell center.
         host.anchorMin = new Vector2(0f, 1f);
         host.anchorMax = new Vector2(0f, 1f);
         host.pivot = new Vector2(0.5f, 0.5f);
+        host.localScale = new Vector3(scale, scale, 1f);
+
+        var screenTop = cellRect.Y - _scrollY;
         host.anchoredPosition = new Vector2(
-            cellRect.X + cellRect.Width * 0.5f,
-            -(screenTop + cellRect.Height * 0.5f)
+            cellRect.X + cellRect.Width * 0.5f - m.CenterOffset.x * scale,
+            -(screenTop + cellRect.Height * 0.5f) - m.CenterOffset.y * scale
         );
     }
 
@@ -459,10 +458,9 @@ internal sealed class CollectionGridVirtualizer
             return;
         if (!cell.SetUpTask.IsCompleted)
             return;
-        cell.ActivationAttempted = true;
-
         if (!cell.SetUpTask.IsCompletedSuccessfully)
         {
+            cell.ActivationAttempted = true;
             var reason = cell.SetUpTask.Exception?.GetBaseException().Message ?? "not successful";
             BppLog.Debug(
                 "CollectionGridVirtualizer",
@@ -484,7 +482,12 @@ internal sealed class CollectionGridVirtualizer
                 show: true,
                 logComponent: "CollectionGridVirtualizer"
             );
-            FitCellToSlot(cell.Index, cell);
+            if (!EnsureFrameMetrics(cell))
+                return;
+            ApplyCellTransform(cell.Index, cell);
+            cell.ActivationAttempted = true;
+            cell.FadeAlpha = 0f;
+            cell.FadeActive = true;
             cell.LayoutReady = true;
         }
         catch (Exception ex)
@@ -508,6 +511,7 @@ internal sealed class CollectionGridVirtualizer
             hover = card.gameObject.AddComponent<CollectionCardHoverRelay>();
         hover.Bind(card);
         cell.HoverRelay = hover;
+        cell.Binding.HoverRelay = hover;
 
         _sourceMatchesByCardId.TryGetValue(cell.Vm.Id, out var sourceMatches);
         CollectionSourceAttributionBadge.Bind(card.gameObject, sourceMatches);
@@ -528,6 +532,30 @@ internal sealed class CollectionGridVirtualizer
     {
         cell.HoverRelay?.Clear();
         _factory.Return(cell.Binding);
+    }
+
+    public void TickFades(float deltaSeconds)
+    {
+        if (deltaSeconds <= 0f)
+            return;
+
+        var t = 1f - Mathf.Exp(-deltaSeconds / CollectionGridConstants.CardFadeInSeconds);
+        foreach (var pair in _realized)
+        {
+            var cell = pair.Value;
+            if (!cell.FadeActive)
+                continue;
+
+            cell.FadeAlpha = Mathf.Lerp(cell.FadeAlpha, 1f, t);
+            if (cell.FadeAlpha >= 0.995f)
+            {
+                cell.FadeAlpha = 1f;
+                cell.FadeActive = false;
+            }
+
+            if (cell.Binding.CanvasGroup != null)
+                cell.Binding.CanvasGroup.alpha = cell.FadeAlpha;
+        }
     }
 
     private void RecycleAll()
@@ -557,40 +585,31 @@ internal sealed class CollectionGridVirtualizer
         _originY = pixels.OriginY;
     }
 
-    private Vector2 BoardLocalToWorld(float x, float yDown)
-    {
-        var board = _overlay.BoardRoot;
-        if (board == null)
-            return Vector2.zero;
-
-        return board.TransformPoint(new Vector3(x, -yDown, 0f));
-    }
-
-    private static WorldBounds MeasureWorldBounds(RectTransform rect)
+    private static LocalBounds MeasureLocalBounds(RectTransform rect, Transform relativeTo)
     {
         var corners = new Vector3[4];
         rect.GetWorldCorners(corners);
-        return new WorldBounds(
-            corners[0].x,
-            corners[0].y,
-            corners[2].x - corners[0].x,
-            corners[2].y - corners[0].y
-        );
-    }
+        var first = relativeTo.InverseTransformPoint(corners[0]);
+        var minX = first.x;
+        var maxX = first.x;
+        var minY = first.y;
+        var maxY = first.y;
 
-    private static RectTransform? FindDescendant(Transform root, string childName)
-    {
-        foreach (var rt in root.GetComponentsInChildren<RectTransform>(true))
+        for (var i = 1; i < corners.Length; i++)
         {
-            if (rt != null && rt.name == childName)
-                return rt;
+            var local = relativeTo.InverseTransformPoint(corners[i]);
+            minX = Mathf.Min(minX, local.x);
+            maxX = Mathf.Max(maxX, local.x);
+            minY = Mathf.Min(minY, local.y);
+            maxY = Mathf.Max(maxY, local.y);
         }
-        return null;
+
+        return new LocalBounds(minX, minY, maxX - minX, maxY - minY);
     }
 
-    private readonly struct WorldBounds
+    private readonly struct LocalBounds
     {
-        public WorldBounds(float x, float y, float width, float height)
+        public LocalBounds(float x, float y, float width, float height)
         {
             X = x;
             Y = y;
@@ -630,8 +649,11 @@ internal sealed class CollectionGridVirtualizer
         public CollectionCardHoverRelay? HoverRelay { get; set; }
         public RectTransform? CachedRect => Binding.Rect;
         public RectTransform? HostRect => Binding.Host;
+        public RectTransform? FrameRect => Binding.Frame;
         public bool ActivationAttempted { get; set; }
         public bool LayoutReady { get; set; }
+        public bool FadeActive { get; set; }
+        public float FadeAlpha { get; set; }
     }
 
     private sealed class FirstWindowBindDiagnostics
@@ -652,9 +674,15 @@ internal sealed class CollectionGridVirtualizer
         private bool _bindingLogged;
         private bool _setUpLogStarted;
 
-        public FirstWindowBindDiagnostics(int generation)
+        private readonly CollectionCardFactoryStatsSnapshot _startedStats;
+
+        public FirstWindowBindDiagnostics(
+            int generation,
+            CollectionCardFactoryStatsSnapshot startedStats
+        )
         {
             _generation = generation;
+            _startedStats = startedStats;
         }
 
         public void EnsureWindow(int firstIndex, int lastIndex, int visibleCount, int shelfCount)
@@ -692,7 +720,10 @@ internal sealed class CollectionGridVirtualizer
             }
         }
 
-        public void TryLogBindingPhase(int currentGeneration)
+        public void TryLogBindingPhase(
+            int currentGeneration,
+            CollectionCardFactoryStatsSnapshot currentStats
+        )
         {
             if (
                 _bindingLogged
@@ -706,6 +737,7 @@ internal sealed class CollectionGridVirtualizer
 
             _bindingLogged = true;
             var elapsedMs = ElapsedMs(_startedAt, Stopwatch.GetTimestamp());
+            var deltaStats = currentStats.DeltaFrom(_startedStats);
             BppLog.Debug(
                 "CollectionGridVirtualizer",
                 "firstWindowBind "
@@ -716,6 +748,10 @@ internal sealed class CollectionGridVirtualizer
                     + $"attempts={_attempts} "
                     + $"bound={_bound} "
                     + $"failed={_failed} "
+                    + $"coldCreates={deltaStats.ColdCreates} "
+                    + $"poolReuses={deltaStats.PoolReuses} "
+                    + $"pendingReturns={deltaStats.PendingReturns} "
+                    + $"rebindFaults={deltaStats.RebindFaults} "
                     + $"bindMs={FormatMs(_bindMs)} "
                     + $"elapsedMs={FormatMs(elapsedMs)}"
             );
